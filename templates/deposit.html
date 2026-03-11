@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Deposit{% endblock %}
+{% block content %}
+<div style="max-width:440px;margin:0 auto">
+<h1 class="page-title">💵 Deposit Money</h1>
+<div class="card">
+  <p style="font-size:13px;color:var(--muted);margin-bottom:20px">Current Balance: <strong style="color:var(--blue3)">₹{{ "{:,.2f}".format(acc.balance) }}</strong></p>
+  <form method="POST">
+    <div class="form-group">
+      <label>Amount to Deposit (₹)</label>
+      <input type="number" name="amount" placeholder="e.g. 10000" min="1" step="0.01" required autofocus>
+    </div>
+    <button type="submit" class="btn btn-success btn-full">💵 Deposit Now</button>
+  </form>
+</div>
+</div>
+{% endblock %}

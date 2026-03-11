@@ -1,0 +1,4 @@
+safebank_web.db
+__pycache__/
+*.pyc
+.env

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+
+<div class="flex-between mb-4">
+  <div>
+    <h1 class="page-title" style="margin-bottom:4px">Welcome back, {{ acc.full_name }} 👋</h1>
+    <p style="color:var(--muted);font-size:14px">Account: <span class="mono">{{ acc.account_id }}</span></p>
+  </div>
+  <a href="/pay" class="btn btn-primary">💳 Make Payment</a>
+</div>
+
+<!-- BALANCE CARD -->
+<div class="card mb-4" style="background:linear-gradient(135deg,#0d1f3c,#0a1628);border-color:#1e3a5f">
+  <p style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:6px">Current Balance</p>
+  <p id="live-balance" style="font-family:'Syne',sans-serif;font-size:42px;font-weight:800;color:#60a5fa">
+    ₹{{ "{:,.2f}".format(acc.balance) }}
+  </p>
+  <p style="font-size:12px;color:var(--muted);margin-top:8px">{{ acc.account_id }} · {{ acc.status }}</p>
+</div>
+
+<!-- QUICK ACTIONS -->
+<div class="grid-3 mb-4">
+  <a href="/pay" class="card-sm" style="display:block;text-align:center;border-color:#1e3a5f;transition:.15s" onmouseover="this.style.borderColor='#3b82f6'" onmouseout="this.style.borderColor='#1e3a5f'">
+    <div style="font-size:28px;margin-bottom:8px">💳</div>
+    <div style="font-weight:700">Make Payment</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:4px">Pay any merchant</div>
+  </a>
+  <a href="/deposit" class="card-sm" style="display:block;text-align:center;border-color:#1e3a5f;transition:.15s" onmouseover="this.style.borderColor='#10b981'" onmouseout="this.style.borderColor='#1e3a5f'">
+    <div style="font-size:28px;margin-bottom:8px">💵</div>
+    <div style="font-weight:700">Deposit Money</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:4px">Add funds to account</div>
+  </a>
+  <a href="/report-fraud" class="card-sm" style="display:block;text-align:center;border-color:#1e3a5f;transition:.15s;position:relative" onmouseover="this.style.borderColor='#ef4444'" onmouseout="this.style.borderColor='#1e3a5f'">
+    <div style="font-size:28px;margin-bottom:8px">🚨</div>
+    <div style="font-weight:700">Report Fraud</div>
+    <div style="font-size:12px;color:var(--muted);margin-top:4px">Get your money back</div>
+    {% if pending_reports > 0 %}
+    <span style="position:absolute;top:12px;right:12px;background:var(--red);color:#fff;font-size:10px;font-weight:700;padding:2px 7px;border-radius:10px">{{ pending_reports }}</span>
+    {% endif %}
+  </a>
+</div>
+
+<!-- RECENT TRANSACTIONS -->
+<div class="card">
+  <div class="flex-between mb-4">
+    <h2 style="font-family:'Syne',sans-serif;font-size:16px;font-weight:700">Recent Transactions</h2>
+    <a href="/transactions" class="btn btn-ghost btn-sm">View All →</a>
+  </div>
+
+  {% if txns %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr>
+        <th>TXN ID</th><th>Date</th><th>Merchant</th><th>Amount</th><th>Status</th><th>Fraud Score</th>
+      </tr></thead>
+      <tbody>
+      {% for t in txns %}
+      {% set is_debit = t.txn_type in ('debit','blocked') %}
+      <tr>
+        <td class="txn-id">{{ t.txn_id }}</td>
+        <td style="color:var(--subtle)">{{ t.timestamp[:16] }}</td>
+        <td>{{ t.merchant or '—' }}</td>
+        <td style="font-weight:700;color:{{ '#ef4444' if is_debit else '#10b981' }}">
+          {{ '-' if is_debit else '+' }}₹{{ "{:,.2f}".format(t.amount) }}
+        </td>
+        <td>
+          {% if t.status == 'success' %}<span class="badge badge-green">✓ Done</span>
+          {% elif t.status == 'flagged' %}<span class="badge badge-yellow">⚠ Flagged</span>
+          {% elif t.status == 'blocked' %}<span class="badge badge-red">🚫 Blocked</span>
+          {% elif t.status == 'reversed' %}<span class="badge badge-blue">↩ Refunded</span>
+          {% elif t.status == 'reversal' %}<span class="badge badge-green">✅ Refund</span>
+          {% else %}<span class="badge badge-gray">{{ t.status }}</span>{% endif %}
+        </td>
+        <td>
+          <div class="score-wrap">
+            <div class="score-bar"><div class="score-fill" style="width:{{ t.fraud_score }}%;background:{{ '#ef4444' if t.fraud_score>=75 else ('#f59e0b' if t.fraud_score>=25 else '#10b981') }}"></div></div>
+            <span style="font-size:12px;color:{{ '#ef4444' if t.fraud_score>=75 else ('#f59e0b' if t.fraud_score>=25 else '#10b981') }}">{{ t.fraud_score }}</span>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">No transactions yet. Make your first payment!</div>
+  {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Auto-refresh balance every 10 seconds
+setInterval(async () => {
+  try {
+    const r = await fetch('/api/balance');
+    const d = await r.json();
+    document.getElementById('live-balance').textContent =
+      '₹' + d.balance.toLocaleString('en-IN', {minimumFractionDigits:2, maximumFractionDigits:2});
+  } catch(e) {}
+}, 10000);
+</script>
+{% endblock %}

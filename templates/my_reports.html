@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}My Fraud Reports{% endblock %}
+{% block content %}
+<h1 class="page-title">📝 My Fraud Reports</h1>
+
+{% if reports %}
+{% for r in reports %}
+<div class="card mb-4" style="border-left:4px solid {{ '#f59e0b' if r.status=='pending' else ('#10b981' if r.status=='approved' else '#ef4444') }}">
+  <div class="flex-between mb-4">
+    <div class="flex gap-3">
+      {% if r.status == 'pending' %}
+        <span class="badge badge-yellow">🕐 PENDING REVIEW</span>
+      {% elif r.status == 'approved' %}
+        <span class="badge badge-green">✅ APPROVED — REFUNDED</span>
+      {% else %}
+        <span class="badge badge-red">❌ REJECTED</span>
+      {% endif %}
+      <span class="txn-id" style="font-size:12px">{{ r.report_id }}</span>
+    </div>
+    <span style="font-size:12px;color:var(--muted)">{{ r.submitted_at[:16] }}</span>
+  </div>
+
+  <div class="grid-2" style="margin-bottom:14px">
+    <div>
+      <p style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Transaction</p>
+      <p class="txn-id">{{ r.txn_id }}</p>
+    </div>
+    <div>
+      <p style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Amount</p>
+      <p style="font-weight:700;font-size:20px;color:var(--red)">₹{{ "{:,.2f}".format(r.amount) }}</p>
+    </div>
+    <div>
+      <p style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Merchant</p>
+      <p>{{ r.merchant }}</p>
+    </div>
+    <div>
+      <p style="font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px">Fraud Score</p>
+      <p style="font-weight:700;color:{{ '#ef4444' if r.fraud_score>=75 else ('#f59e0b' if r.fraud_score>=25 else '#10b981') }}">{{ r.fraud_score }}/100</p>
+    </div>
+  </div>
+
+  <div style="padding:12px;background:var(--card2);border-radius:8px;margin-bottom:12px">
+    <p style="font-size:11px;color:var(--muted);margin-bottom:4px">YOUR REASON</p>
+    <p style="font-size:13px">{{ r.reason }}</p>
+    {% if r.evidence %}
+    <p style="font-size:11px;color:var(--muted);margin-top:8px;margin-bottom:4px">EVIDENCE</p>
+    <p style="font-size:13px;color:var(--subtle)">{{ r.evidence }}</p>
+    {% endif %}
+  </div>
+
+  {% if r.status == 'approved' %}
+  <div style="padding:14px;background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.3);border-radius:10px">
+    <p style="color:var(--green);font-weight:700;margin-bottom:6px">✅ Refund Processed!</p>
+    <p style="font-size:13px;color:var(--subtle)">₹{{ "{:,.2f}".format(r.amount) }} has been credited back to your account.</p>
+    <p style="font-size:12px;color:var(--muted);margin-top:4px">Refund TXN: <span class="txn-id">{{ r.refund_txn_id }}</span></p>
+    {% if r.admin_notes %}<p style="font-size:12px;color:var(--muted);margin-top:4px">Bank Note: {{ r.admin_notes }}</p>{% endif %}
+    <p style="font-size:12px;color:var(--muted);margin-top:4px">Reviewed: {{ r.reviewed_at[:16] if r.reviewed_at }}</p>
+  </div>
+
+  {% elif r.status == 'rejected' %}
+  <div style="padding:14px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:10px">
+    <p style="color:var(--red);font-weight:700;margin-bottom:4px">❌ Report Rejected</p>
+    {% if r.admin_notes %}<p style="font-size:13px;color:var(--subtle)">Reason: {{ r.admin_notes }}</p>{% endif %}
+    <p style="font-size:12px;color:var(--muted);margin-top:4px">Reviewed: {{ r.reviewed_at[:16] if r.reviewed_at }}</p>
+  </div>
+
+  {% else %}
+  <div style="padding:12px;background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);border-radius:10px">
+    <p style="color:var(--yellow);font-size:13px">🕐 Your report is currently being reviewed by the bank admin. You'll see the refund in your account as soon as it's approved.</p>
+  </div>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% else %}
+<div class="card empty">
+  <p>No fraud reports yet.</p>
+  <p style="margin-top:8px;font-size:13px">If you see a suspicious transaction, <a href="/report-fraud">report it here →</a></p>
+</div>
+{% endif %}
+{% endblock %}
