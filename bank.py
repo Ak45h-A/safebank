@@ -281,3 +281,33 @@ def get_all_users():
             ORDER BY u.created_at DESC""", ())
     finally:
         close(conn)
+
+
+def delete_user_history(account_id):
+    """
+    Admin function: deletes ALL transactions for a user.
+    Also deletes related fraud reports.
+    Account and balance are kept — only history is wiped.
+    """
+    conn = get_connection()
+    try:
+        # Count first so we can report how many were deleted
+        rows = _pg_fetchone(conn,
+            "SELECT COUNT(*) as n FROM transactions WHERE account_id=?",
+            (account_id,))
+        count = int(rows["n"]) if rows and rows["n"] else 0
+
+        # Delete fraud reports linked to this account's transactions first
+        run(conn, "DELETE FROM fraud_reports WHERE account_id=?", (account_id,))
+
+        # Delete all transactions
+        run(conn, "DELETE FROM transactions WHERE account_id=?", (account_id,))
+
+        commit(conn)
+        return {"success": True,
+                "message": f"Deleted {count} transaction(s) and all fraud reports for this account."}
+    except Exception as e:
+        rollback(conn)
+        return {"success": False, "error": str(e)}
+    finally:
+        close(conn)
