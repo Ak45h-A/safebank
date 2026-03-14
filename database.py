@@ -1,33 +1,37 @@
 """
 database.py — Database connection for SafeBank
-- On Render (production): uses PostgreSQL via DATABASE_URL environment variable
-- On your laptop (local): uses SQLite as before
+- On Render (production): uses PostgreSQL via DATABASE_URL (using pg8000)
+- On your laptop (local): uses SQLite
 """
 import os
 import sqlite3
 
-# Check if we have a PostgreSQL URL set (Render sets this automatically)
 DATABASE_URL = os.environ.get("DATABASE_URL")
 USING_POSTGRES = DATABASE_URL is not None
 
 if USING_POSTGRES:
-    import psycopg2
-    import psycopg2.extras
+    import pg8000.native
     print("[✓] Using PostgreSQL (Neon cloud database)")
 else:
     print("[✓] Using SQLite (local development)")
 
-DB_FILE = "safebank_web.db"  # Only used for SQLite
+DB_FILE = "safebank_web.db"
 
 
 def get_connection():
-    """
-    Returns a database connection.
-    Automatically uses PostgreSQL on Render, SQLite locally.
-    """
     if USING_POSTGRES:
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = False
+        # Parse the DATABASE_URL manually for pg8000
+        # Format: postgresql://user:password@host/dbname?sslmode=require
+        import urllib.parse as up
+        url = up.urlparse(DATABASE_URL)
+        conn = pg8000.native.Connection(
+            user     = url.username,
+            password = url.password,
+            host     = url.hostname,
+            port     = url.port or 5432,
+            database = url.path[1:],  # remove leading /
+            ssl_context = True        # Neon requires SSL
+        )
         return conn
     else:
         conn = sqlite3.connect(DB_FILE)
@@ -36,54 +40,103 @@ def get_connection():
         return conn
 
 
-def fetchone_as_dict(cursor, query, params=()):
-    """Execute query and return one row as a dict (works for both DBs)."""
-    cursor.execute(query, params)
-    row = cursor.fetchone()
-    if row is None:
-        return None
+def fetchone_as_dict(cursor_or_conn, query, params=()):
+    """Execute query and return one row as a dict."""
     if USING_POSTGRES:
-        cols = [desc[0] for desc in cursor.description]
-        return dict(zip(cols, row))
+        # pg8000 native uses conn directly, not cursor
+        conn = cursor_or_conn
+        rows = conn.run(query, **_params_to_kwargs(query, params))
+        if not rows:
+            return None
+        cols = [col["name"] for col in conn.columns]
+        return dict(zip(cols, rows[0]))
     else:
-        return dict(row)
+        cursor_or_conn.execute(query, params)
+        row = cursor_or_conn.fetchone()
+        return dict(row) if row else None
 
 
-def fetchall_as_dict(cursor, query, params=()):
-    """Execute query and return all rows as list of dicts (works for both DBs)."""
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
+def fetchall_as_dict(cursor_or_conn, query, params=()):
+    """Execute query and return all rows as list of dicts."""
     if USING_POSTGRES:
-        cols = [desc[0] for desc in cursor.description]
+        conn = cursor_or_conn
+        rows = conn.run(query, **_params_to_kwargs(query, params))
+        if not rows:
+            return []
+        cols = [col["name"] for col in conn.columns]
         return [dict(zip(cols, row)) for row in rows]
     else:
-        return [dict(row) for row in rows]
+        cursor_or_conn.execute(query, params)
+        return [dict(row) for row in cursor_or_conn.fetchall()]
 
 
-def placeholder():
+def execute_query(cursor_or_conn, query, params=()):
+    """Execute INSERT/UPDATE/DELETE."""
+    if USING_POSTGRES:
+        cursor_or_conn.run(query, **_params_to_kwargs(query, params))
+    else:
+        cursor_or_conn.execute(query, params)
+
+
+def _params_to_kwargs(query, params):
     """
-    SQL placeholder differs between databases:
-    SQLite uses ?  →  INSERT INTO t VALUES (?, ?)
-    PostgreSQL uses %s  →  INSERT INTO t VALUES (%s, %s)
+    pg8000 native uses named params like :p1 :p2 instead of ? or %s.
+    This converts a params tuple to a dict {p1: val1, p2: val2, ...}
+    and replaces ? or %s in the query.
+    But we handle this differently — we use positional :p1 style.
     """
-    return "%s" if USING_POSTGRES else "?"
+    return {}  # handled in adapt_query
 
 
 def adapt_query(query):
-    """Convert SQLite ? placeholders to PostgreSQL %s placeholders."""
+    """
+    Convert SQLite ? placeholders to pg8000 :p1, :p2 style
+    OR keep as-is for SQLite.
+    """
+    if not USING_POSTGRES:
+        return query
+    # Replace each ? with :p1, :p2, :p3 etc
+    result = ""
+    i = 1
+    for ch in query:
+        if ch == "?":
+            result += f":p{i}"
+            i += 1
+        else:
+            result += ch
+    return result
+
+
+def params_to_pg(params):
+    """Convert a tuple of params to pg8000 named dict {p1:v, p2:v}."""
+    return {f"p{i+1}": v for i, v in enumerate(params)}
+
+
+def commit(conn):
     if USING_POSTGRES:
-        return query.replace("?", "%s")
-    return query
+        pass  # pg8000 native auto-commits each run() call
+    else:
+        conn.commit()
+
+
+def rollback(conn):
+    if USING_POSTGRES:
+        pass  # pg8000 native — nothing to rollback in native mode
+    else:
+        conn.rollback()
+
+
+def close(conn):
+    if USING_POSTGRES:
+        conn.close()
+    else:
+        conn.close()
 
 
 def initialize_database():
-    conn = get_connection()
-    c    = conn.cursor()
-
     if USING_POSTGRES:
-        # PostgreSQL syntax — uses SERIAL or TEXT for IDs
-        # TEXT DEFAULT now() becomes DEFAULT NOW()
-        c.execute("""
+        conn = get_connection()
+        conn.run("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id       TEXT PRIMARY KEY,
                 full_name     TEXT NOT NULL,
@@ -94,7 +147,7 @@ def initialize_database():
                 created_at    TEXT DEFAULT (to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS'))
             )
         """)
-        c.execute("""
+        conn.run("""
             CREATE TABLE IF NOT EXISTS accounts (
                 account_id  TEXT PRIMARY KEY,
                 user_id     TEXT NOT NULL,
@@ -102,7 +155,7 @@ def initialize_database():
                 status      TEXT DEFAULT 'active'
             )
         """)
-        c.execute("""
+        conn.run("""
             CREATE TABLE IF NOT EXISTS transactions (
                 txn_id        TEXT PRIMARY KEY,
                 account_id    TEXT NOT NULL,
@@ -117,7 +170,7 @@ def initialize_database():
                 timestamp     TEXT DEFAULT (to_char(NOW(), 'YYYY-MM-DD HH24:MI:SS'))
             )
         """)
-        c.execute("""
+        conn.run("""
             CREATE TABLE IF NOT EXISTS fraud_reports (
                 report_id     TEXT PRIMARY KEY,
                 txn_id        TEXT NOT NULL,
@@ -134,64 +187,37 @@ def initialize_database():
                 refund_txn_id TEXT
             )
         """)
+        conn.close()
     else:
-        # SQLite syntax (local development)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id       TEXT PRIMARY KEY,
-                full_name     TEXT NOT NULL,
-                email         TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                phone         TEXT,
-                is_admin      INTEGER DEFAULT 0,
-                created_at    TEXT DEFAULT (datetime('now'))
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS accounts (
-                account_id  TEXT PRIMARY KEY,
-                user_id     TEXT NOT NULL,
-                balance     REAL DEFAULT 0.0,
-                status      TEXT DEFAULT 'active',
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                txn_id        TEXT PRIMARY KEY,
-                account_id    TEXT NOT NULL,
-                txn_type      TEXT NOT NULL,
-                amount        REAL NOT NULL,
-                balance_after REAL NOT NULL,
-                description   TEXT,
-                merchant      TEXT,
-                location      TEXT,
-                fraud_score   INTEGER DEFAULT 0,
-                status        TEXT DEFAULT 'success',
-                timestamp     TEXT DEFAULT (datetime('now')),
-                FOREIGN KEY (account_id) REFERENCES accounts(account_id)
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS fraud_reports (
-                report_id     TEXT PRIMARY KEY,
-                txn_id        TEXT NOT NULL,
-                account_id    TEXT NOT NULL,
-                user_id       TEXT NOT NULL,
-                reason        TEXT NOT NULL,
-                evidence      TEXT,
-                status        TEXT DEFAULT 'pending',
-                fraud_score   INTEGER DEFAULT 0,
-                submitted_at  TEXT DEFAULT (datetime('now')),
-                reviewed_at   TEXT,
-                reviewed_by   TEXT,
-                admin_notes   TEXT,
-                refund_txn_id TEXT
-            )
-        """)
-
-    conn.commit()
-    conn.close()
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        c.execute("""CREATE TABLE IF NOT EXISTS users (
+            user_id TEXT PRIMARY KEY, full_name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL,
+            phone TEXT, is_admin INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now')))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS accounts (
+            account_id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+            balance REAL DEFAULT 0.0, status TEXT DEFAULT 'active',
+            FOREIGN KEY (user_id) REFERENCES users(user_id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS transactions (
+            txn_id TEXT PRIMARY KEY, account_id TEXT NOT NULL,
+            txn_type TEXT NOT NULL, amount REAL NOT NULL,
+            balance_after REAL NOT NULL, description TEXT,
+            merchant TEXT, location TEXT, fraud_score INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'success',
+            timestamp TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (account_id) REFERENCES accounts(account_id))""")
+        c.execute("""CREATE TABLE IF NOT EXISTS fraud_reports (
+            report_id TEXT PRIMARY KEY, txn_id TEXT NOT NULL,
+            account_id TEXT NOT NULL, user_id TEXT NOT NULL,
+            reason TEXT NOT NULL, evidence TEXT,
+            status TEXT DEFAULT 'pending', fraud_score INTEGER DEFAULT 0,
+            submitted_at TEXT DEFAULT (datetime('now')),
+            reviewed_at TEXT, reviewed_by TEXT,
+            admin_notes TEXT, refund_txn_id TEXT)""")
+        conn.commit()
+        conn.close()
     print("[✓] Database ready.")
 
 
