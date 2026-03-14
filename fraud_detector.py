@@ -75,5 +75,4 @@ def get_risk_level(score):
     if score >= 75: return "CRITICAL"
     if score >= 50: return "HIGH"
     if score >= 25: return "MEDIUM"
-      
     return "LOW"
