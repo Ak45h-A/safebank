@@ -2,10 +2,19 @@
 {% block title %}Admin — Users{% endblock %}
 {% block content %}
 <h1 class="page-title">👥 All Users ({{ users|length }})</h1>
+
+<div class="card-sm mb-4" style="background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.2);border-radius:10px">
+  <p style="font-size:13px;color:var(--yellow)">
+    ⚠️ <strong>Delete History</strong> permanently removes all transactions for that user.
+    Their account and balance remain. This action cannot be undone.
+  </p>
+</div>
+
 <div class="table-wrap">
   <table>
     <thead><tr>
-      <th>Name</th><th>Email</th><th>Account ID</th><th>Balance</th><th>Status</th><th>Role</th><th>Joined</th>
+      <th>Name</th><th>Email</th><th>Account ID</th><th>Balance</th>
+      <th>Status</th><th>Role</th><th>Joined</th><th>Actions</th>
     </tr></thead>
     <tbody>
     {% for u in users %}
@@ -23,6 +32,18 @@
         {% else %}<span class="badge badge-gray">User</span>{% endif %}
       </td>
       <td style="color:var(--muted)">{{ u.created_at[:10] }}</td>
+      <td>
+        {% if not u.is_admin %}
+        <form method="POST" action="/admin/delete-history/{{ u.account_id }}"
+              onsubmit="return confirm('Delete ALL transaction history for {{ u.full_name }}?\n\nThis cannot be undone. Their account and balance will remain.')">
+          <button type="submit" class="btn btn-danger btn-sm">
+            🗑️ Delete History
+          </button>
+        </form>
+        {% else %}
+        <span style="font-size:12px;color:var(--muted)">Protected</span>
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
     </tbody>
