@@ -23,16 +23,32 @@ app.config["SESSION_PERMANENT"] = True
 # reaches the __main__ block — so database init must happen at import time.
 def startup():
     from bank import register_user as reg
-    from database import get_connection
-    initialize_database()
-    conn = get_connection()
-    c    = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE email='admin@safebank.com'")
-    if not c.fetchone():
-        reg("Bank Admin", "admin@safebank.com", "admin123", "9999999999", 999999, is_admin=1)
-        print("Admin account created: admin@safebank.com / admin123")
-    conn.close()
-    print("SafeBank database ready.")
+    from database import USING_POSTGRES, get_connection, close
+    try:
+        initialize_database()
+        print("SafeBank database initialized.")
+    except Exception as e:
+        print(f"DB init error: {e}")
+        return
+    try:
+        conn = get_connection()
+        if USING_POSTGRES:
+            rows = conn.run("SELECT user_id FROM users WHERE email=:p1",
+                            p1="admin@safebank.com")
+            exists = len(rows) > 0
+        else:
+            c = conn.cursor()
+            c.execute("SELECT user_id FROM users WHERE email=?",
+                      ("admin@safebank.com",))
+            exists = c.fetchone() is not None
+        close(conn)
+        if not exists:
+            reg("Bank Admin", "admin@safebank.com", "admin123",
+                "9999999999", 999999, is_admin=1)
+            print("Admin account created: admin@safebank.com / admin123")
+        print("SafeBank database ready.")
+    except Exception as e:
+        print(f"Admin setup error: {e}")
 
 startup()
 
