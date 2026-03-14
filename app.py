@@ -7,7 +7,8 @@ from flask import Flask, render_template, request, redirect, url_for, session, j
 from database import initialize_database
 from bank import (register_user, login_user, get_user_account, get_transactions,
                   make_payment, deposit_money, submit_fraud_report,
-                  get_fraud_reports, admin_process_report, get_all_users)
+                  get_fraud_reports, admin_process_report, get_all_users,
+                  delete_user_history)
 import os
 
 app = Flask(__name__)
@@ -299,6 +300,17 @@ def admin_process(report_id):
 def admin_users():
     users = get_all_users()
     return render_template("admin_users.html", users=users)
+
+
+@app.route("/admin/delete-history/<account_id>", methods=["POST"])
+@require_admin
+def admin_delete_history(account_id):
+    result = delete_user_history(account_id)
+    if result["success"]:
+        flash(result["message"], "success")
+    else:
+        flash(result["error"], "error")
+    return redirect(url_for("admin_users"))
 
 # ── API ───────────────────────────────────────────────────────────────────────
 
