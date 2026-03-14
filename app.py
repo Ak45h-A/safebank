@@ -13,6 +13,10 @@ import os
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "safebank-local-dev-key-2024")
 
+# Session never expires — user stays logged in until they click Logout
+app.config["PERMANENT_SESSION_LIFETIME"] = __import__("datetime").timedelta(days=365)
+app.config["SESSION_PERMANENT"] = True
+
 # ── RUNS ON EVERY STARTUP (local AND Render) ──────────────────────────────
 # IMPORTANT: This must be outside if __name__ == "__main__"
 # When Render runs "gunicorn app:app", it imports app.py but never
@@ -31,6 +35,10 @@ def startup():
     print("SafeBank database ready.")
 
 startup()
+
+@app.before_request
+def make_session_permanent():
+    session.permanent = True
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
