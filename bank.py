@@ -1,301 +1,283 @@
 """
-app.py — SafeBank Web Application
-Run: python app.py
-Then open: http://localhost:5000
+bank.py — Core banking operations
+Works with PostgreSQL (Render/Neon) and SQLite (local)
 """
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, flash
-from database import initialize_database
-from bank import (register_user, login_user, get_user_account, get_transactions,
-                  make_payment, deposit_money, submit_fraud_report,
-                  get_fraud_reports, admin_process_report, get_all_users)
-import os
+import hashlib, uuid
+from datetime import datetime
+from database import (get_connection, fetchone_as_dict, fetchall_as_dict,
+                      execute_query, adapt_query, params_to_pg,
+                      commit, rollback, close, USING_POSTGRES)
 
-app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "safebank-local-dev-key-2024")
+def gen_id(prefix):
+    date = datetime.now().strftime("%Y%m%d")
+    rand = uuid.uuid4().hex[:6].upper()
+    return f"{prefix}-{date}-{rand}"
 
-# Session never expires — user stays logged in until they click Logout
-app.config["PERMANENT_SESSION_LIFETIME"] = __import__("datetime").timedelta(days=365)
-app.config["SESSION_PERMANENT"] = True
+def hash_pw(pw):
+    return hashlib.sha256(pw.encode()).hexdigest()
 
-# ── RUNS ON EVERY STARTUP (local AND Render) ──────────────────────────────
-# IMPORTANT: This must be outside if __name__ == "__main__"
-# When Render runs "gunicorn app:app", it imports app.py but never
-# reaches the __main__ block — so database init must happen at import time.
-def startup():
-    from bank import register_user as reg
-    from database import get_connection
-    initialize_database()
-    conn = get_connection()
-    c    = conn.cursor()
-    c.execute("SELECT user_id FROM users WHERE email='admin@safebank.com'")
-    if not c.fetchone():
-        reg("Bank Admin", "admin@safebank.com", "admin123", "9999999999", 999999, is_admin=1)
-        print("Admin account created: admin@safebank.com / admin123")
-    conn.close()
-    print("SafeBank database ready.")
+def fmt(n):
+    return f"₹{float(n):,.2f}"
 
-startup()
-
-@app.before_request
-def make_session_permanent():
-    session.permanent = True
-
-# ── HELPERS ───────────────────────────────────────────────────────────────────
-
-def logged_in_user():
-    """Returns current user dict from session, or None."""
-    return session.get("user")
-
-def require_login(f):
-    """Decorator: redirect to USER login if not logged in."""
-    from functools import wraps
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if not logged_in_user():
-            flash("Please login to your account first.", "warning")
-            return redirect(url_for("user_login"))
-        if logged_in_user().get("is_admin"):
-            return redirect(url_for("admin_dashboard"))
-        return f(*args, **kwargs)
-    return wrapper
-
-def require_admin(f):
-    """Decorator: only admins can access."""
-    from functools import wraps
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        user = logged_in_user()
-        if not user:
-            flash("Admin login required.", "warning")
-            return redirect(url_for("admin_login"))
-        if not user.get("is_admin"):
-            flash("You do not have admin access.", "error")
-            return redirect(url_for("user_login"))
-        return f(*args, **kwargs)
-    return wrapper
-
-# ── PUBLIC ROUTES ─────────────────────────────────────────────────────────────
-
-@app.route("/")
-def index():
-    user = logged_in_user()
-    if user:
-        if user.get("is_admin"):
-            return redirect(url_for("admin_dashboard"))
-        return redirect(url_for("dashboard"))
-    return redirect(url_for("user_login"))
-
-# ── USER LOGIN / REGISTER ─────────────────────────────────────────────────────
-
-@app.route("/login", methods=["GET", "POST"])
-def user_login():
-    if logged_in_user():
-        if logged_in_user().get("is_admin"):
-            return redirect(url_for("admin_dashboard"))
-        return redirect(url_for("dashboard"))
-
-    if request.method == "POST":
-        result = login_user(request.form["email"], request.form["password"])
-        if result["success"]:
-            if result["is_admin"]:
-                flash("This is the customer login page. Admins must use the Admin Portal.", "error")
-                return redirect(url_for("admin_login"))
-            session["user"] = {
-                "user_id":    result["user_id"],
-                "full_name":  result["full_name"],
-                "email":      result["email"],
-                "account_id": result["account_id"],
-                "is_admin":   0,
-            }
-            return redirect(url_for("dashboard"))
-        flash(result["error"], "error")
-
-    return render_template("login_user.html")
-
-
-@app.route("/admin/login", methods=["GET", "POST"])
-def admin_login():
-    if logged_in_user():
-        if logged_in_user().get("is_admin"):
-            return redirect(url_for("admin_dashboard"))
-        session.clear()
-
-    if request.method == "POST":
-        result = login_user(request.form["email"], request.form["password"])
-        if result["success"]:
-            if not result["is_admin"]:
-                flash("Access denied. This portal is for bank administrators only.", "error")
-                return render_template("login_admin.html")
-            session["user"] = {
-                "user_id":    result["user_id"],
-                "full_name":  result["full_name"],
-                "email":      result["email"],
-                "account_id": result["account_id"],
-                "is_admin":   1,
-            }
-            return redirect(url_for("admin_dashboard"))
-        flash(result["error"], "error")
-
-    return render_template("login_admin.html")
-
-
-@app.route("/register", methods=["GET","POST"])
-def register():
-    if request.method == "POST":
-        result = register_user(
-            request.form["full_name"],
-            request.form["email"],
-            request.form["password"],
-            request.form.get("phone",""),
-            request.form.get("initial_deposit", 1000),
-            is_admin=0
-        )
-        if result["success"]:
-            flash("Account created successfully! Please login.", "success")
-            return redirect(url_for("user_login"))
-        flash(result["error"], "error")
-    return render_template("register.html")
-
-@app.route("/logout")
-def logout():
-    was_admin = logged_in_user() and logged_in_user().get("is_admin")
-    session.clear()
-    flash("Logged out successfully.", "success")
-    if was_admin:
-        return redirect(url_for("admin_login"))
-    return redirect(url_for("user_login"))
-
-# ── USER ROUTES ───────────────────────────────────────────────────────────────
-
-@app.route("/dashboard")
-@require_login
-def dashboard():
-    user = logged_in_user()
-    acc  = get_user_account(user["user_id"])
-    txns = get_transactions(acc["account_id"], limit=5)
-    my_reports = get_fraud_reports(account_id=acc["account_id"])
-    pending = sum(1 for r in my_reports if r["status"] == "pending")
-    return render_template("dashboard.html", acc=acc, txns=txns, pending_reports=pending)
-
-@app.route("/transactions")
-@require_login
-def transactions():
-    user = logged_in_user()
-    acc  = get_user_account(user["user_id"])
-    txns = get_transactions(acc["account_id"], limit=50)
-    return render_template("transactions.html", acc=acc, txns=txns)
-
-@app.route("/pay", methods=["GET","POST"])
-@require_login
-def pay():
-    user = logged_in_user()
-    acc  = get_user_account(user["user_id"])
-    if request.method == "POST":
-        result = make_payment(
-            acc["account_id"],
-            request.form["amount"],
-            request.form["merchant"],
-            request.form.get("location","India"),
-            request.form.get("description","")
-        )
-        return render_template("pay.html", acc=acc, result=result, form=request.form)
-    return render_template("pay.html", acc=acc, result=None, form=None)
-
-@app.route("/deposit", methods=["GET","POST"])
-@require_login
-def deposit():
-    user = logged_in_user()
-    acc  = get_user_account(user["user_id"])
-    if request.method == "POST":
-        result = deposit_money(acc["account_id"], request.form["amount"])
-        if result["success"]:
-            flash(f"Deposited successfully!", "success")
-            return redirect(url_for("dashboard"))
-        flash(result["error"], "error")
-    return render_template("deposit.html", acc=acc)
-
-@app.route("/report-fraud", methods=["GET","POST"])
-@require_login
-def report_fraud():
-    user = logged_in_user()
-    acc  = get_user_account(user["user_id"])
-    all_txns   = get_transactions(acc["account_id"], limit=50)
-    refundable = [t for t in all_txns if t["txn_type"] == "debit" and t["status"] not in ("reversed",)]
-
-    if request.method == "POST":
-        result = submit_fraud_report(
-            acc["account_id"],
-            user["user_id"],
-            request.form["txn_id"],
-            request.form["reason"],
-            request.form.get("evidence","")
-        )
-        if result["success"]:
-            flash(result["message"], "success")
-            return redirect(url_for("my_reports"))
-        flash(result["error"], "error")
-
-    return render_template("report_fraud.html", acc=acc, refundable=refundable)
-
-@app.route("/my-reports")
-@require_login
-def my_reports():
-    user    = logged_in_user()
-    acc     = get_user_account(user["user_id"])
-    reports = get_fraud_reports(account_id=acc["account_id"])
-    return render_template("my_reports.html", acc=acc, reports=reports)
-
-# ── ADMIN ROUTES ──────────────────────────────────────────────────────────────
-
-@app.route("/admin")
-@require_admin
-def admin_dashboard():
-    pending  = get_fraud_reports(status_filter="pending")
-    approved = get_fraud_reports(status_filter="approved")
-    rejected = get_fraud_reports(status_filter="rejected")
-    users    = get_all_users()
-    return render_template("admin_dashboard.html",
-                           pending=pending, approved=approved,
-                           rejected=rejected, users=users)
-
-@app.route("/admin/reports")
-@require_admin
-def admin_reports():
-    status  = request.args.get("status","pending")
-    reports = get_fraud_reports(status_filter=status if status != "all" else None)
-    return render_template("admin_reports.html", reports=reports, current_status=status)
-
-@app.route("/admin/process/<report_id>", methods=["POST"])
-@require_admin
-def admin_process(report_id):
-    user    = logged_in_user()
-    approve = request.form.get("action") == "approve"
-    notes   = request.form.get("admin_notes","")
-    result  = admin_process_report(report_id, approve, user["user_id"], notes)
-    if result["success"]:
-        flash(result["message"], "success" if approve else "warning")
+def run(conn, query, params=()):
+    """Universal query runner — handles both PostgreSQL and SQLite."""
+    q = adapt_query(query)
+    if USING_POSTGRES:
+        if params:
+            return conn.run(q, **params_to_pg(params))
+        return conn.run(q)
     else:
-        flash(result["error"], "error")
-    return redirect(url_for("admin_reports", status="pending"))
+        conn.execute(q, params)
 
-@app.route("/admin/users")
-@require_admin
-def admin_users():
-    users = get_all_users()
-    return render_template("admin_users.html", users=users)
+# ── USER ──────────────────────────────────────────────────────────────────────
 
-# ── API ───────────────────────────────────────────────────────────────────────
+def register_user(full_name, email, password, phone, initial_deposit, is_admin=0):
+    conn = get_connection()
+    try:
+        existing = fetchone_as_dict(conn if USING_POSTGRES else conn.cursor(),
+            adapt_query("SELECT user_id FROM users WHERE email=?"), (email,)) \
+            if not USING_POSTGRES else _pg_fetchone(conn, "SELECT user_id FROM users WHERE email=?", (email,))
 
-@app.route("/api/balance")
-@require_login
-def api_balance():
-    user = logged_in_user()
-    acc  = get_user_account(user["user_id"])
-    return jsonify({"balance": acc["balance"]})
+        if existing:
+            return {"success": False, "error": "Email already registered."}
+        if float(initial_deposit) < 500:
+            return {"success": False, "error": "Minimum opening deposit is ₹500."}
 
-# ── LOCAL RUN ONLY ────────────────────────────────────────────────────────────
+        uid = gen_id("USR")
+        aid = gen_id("ACC")
+        tid = gen_id("TXN")
+        dep = float(initial_deposit)
 
-if __name__ == "__main__":
-    print("SafeBank running at http://localhost:5000")
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=True, host="0.0.0.0", port=port)
+        run(conn, "INSERT INTO users (user_id,full_name,email,password_hash,phone,is_admin) VALUES(?,?,?,?,?,?)",
+            (uid, full_name, email, hash_pw(password), phone, is_admin))
+        run(conn, "INSERT INTO accounts (account_id,user_id,balance) VALUES(?,?,?)",
+            (aid, uid, dep))
+        run(conn, "INSERT INTO transactions (txn_id,account_id,txn_type,amount,balance_after,description,merchant,location) VALUES(?,?,'credit',?,?,'Initial Deposit','SafeBank','Branch')",
+            (tid, aid, dep, dep))
+
+        commit(conn)
+        return {"success": True, "user_id": uid, "account_id": aid}
+    except Exception as e:
+        rollback(conn)
+        return {"success": False, "error": str(e)}
+    finally:
+        close(conn)
+
+
+def _pg_fetchone(conn, query, params=()):
+    q = adapt_query(query)
+    if USING_POSTGRES:
+        rows = conn.run(q, **params_to_pg(params)) if params else conn.run(q)
+        if not rows: return None
+        cols = [col["name"] for col in conn.columns]
+        return dict(zip(cols, rows[0]))
+    else:
+        c = conn.cursor()
+        c.execute(q, params)
+        row = c.fetchone()
+        return dict(row) if row else None
+
+def _pg_fetchall(conn, query, params=()):
+    q = adapt_query(query)
+    if USING_POSTGRES:
+        rows = conn.run(q, **params_to_pg(params)) if params else conn.run(q)
+        if not rows: return []
+        cols = [col["name"] for col in conn.columns]
+        return [dict(zip(cols, row)) for row in rows]
+    else:
+        c = conn.cursor()
+        c.execute(q, params)
+        return [dict(row) for row in c.fetchall()]
+
+
+def login_user(email, password):
+    conn = get_connection()
+    try:
+        row = _pg_fetchone(conn, """
+            SELECT u.user_id, u.full_name, u.email, u.password_hash, u.is_admin,
+                   a.account_id, a.balance, a.status as acc_status
+            FROM users u JOIN accounts a ON u.user_id = a.user_id
+            WHERE u.email=?""", (email,))
+        if not row:               return {"success": False, "error": "Email not found."}
+        if row["password_hash"] != hash_pw(password): return {"success": False, "error": "Wrong password."}
+        if row["acc_status"] != "active":             return {"success": False, "error": "Account is not active."}
+        return {"success": True, **row}
+    finally:
+        close(conn)
+
+
+def get_user_account(user_id):
+    conn = get_connection()
+    try:
+        return _pg_fetchone(conn, """
+            SELECT a.account_id, a.user_id, a.balance, a.status,
+                   u.full_name, u.email, u.phone, u.is_admin
+            FROM accounts a JOIN users u ON a.user_id = u.user_id
+            WHERE a.user_id=?""", (user_id,))
+    finally:
+        close(conn)
+
+
+def get_transactions(account_id, limit=50):
+    conn = get_connection()
+    try:
+        return _pg_fetchall(conn,
+            "SELECT * FROM transactions WHERE account_id=? ORDER BY timestamp DESC LIMIT ?",
+            (account_id, limit))
+    finally:
+        close(conn)
+
+
+def make_payment(account_id, amount, merchant, location="India", description=""):
+    conn = get_connection()
+    try:
+        amount = float(amount)
+        if amount <= 0: return {"success": False, "error": "Amount must be > 0"}
+
+        acc = _pg_fetchone(conn, "SELECT balance, status FROM accounts WHERE account_id=?", (account_id,))
+        if not acc:                   return {"success": False, "error": "Account not found"}
+        if acc["status"] != "active": return {"success": False, "error": "Account not active"}
+        if acc["balance"] < amount:   return {"success": False, "error": f"Insufficient balance. Available: {fmt(acc['balance'])}"}
+
+        from fraud_detector import calculate_fraud_score, get_risk_level
+        score, reasons = calculate_fraud_score(account_id, amount, merchant, location)
+        risk = get_risk_level(score)
+
+        if score >= 75:
+            tid = gen_id("TXN")
+            run(conn, "INSERT INTO transactions (txn_id,account_id,txn_type,amount,balance_after,description,merchant,location,fraud_score,status) VALUES(?,?,'blocked',?,?,?,?,?,?,'blocked')",
+                (tid, account_id, amount, acc["balance"], description or f"Payment to {merchant}", merchant, location, score))
+            commit(conn)
+            return {"success": False, "blocked": True, "txn_id": tid,
+                    "fraud_score": score, "risk_level": risk, "reasons": reasons,
+                    "error": "Transaction BLOCKED — high fraud risk. Your money is safe."}
+
+        new_bal = acc["balance"] - amount
+        status  = "flagged" if score >= 25 else "success"
+        run(conn, "UPDATE accounts SET balance=? WHERE account_id=?", (new_bal, account_id))
+        tid = gen_id("TXN")
+        run(conn, "INSERT INTO transactions (txn_id,account_id,txn_type,amount,balance_after,description,merchant,location,fraud_score,status) VALUES(?,?,'debit',?,?,?,?,?,?,?)",
+            (tid, account_id, amount, new_bal, description or f"Payment to {merchant}", merchant, location, score, status))
+        commit(conn)
+        return {"success": True, "txn_id": tid, "amount": amount, "new_balance": new_bal,
+                "fraud_score": score, "risk_level": risk, "flagged": score >= 25, "reasons": reasons}
+    except Exception as e:
+        rollback(conn); return {"success": False, "error": str(e)}
+    finally:
+        close(conn)
+
+
+def deposit_money(account_id, amount):
+    conn = get_connection()
+    try:
+        amount  = float(amount)
+        acc     = _pg_fetchone(conn, "SELECT balance FROM accounts WHERE account_id=?", (account_id,))
+        new_bal = acc["balance"] + amount
+        run(conn, "UPDATE accounts SET balance=? WHERE account_id=?", (new_bal, account_id))
+        tid = gen_id("TXN")
+        run(conn, "INSERT INTO transactions (txn_id,account_id,txn_type,amount,balance_after,description,merchant,location) VALUES(?,?,'credit',?,?,'Cash Deposit','ATM/Branch','India')",
+            (tid, account_id, amount, new_bal))
+        commit(conn)
+        return {"success": True, "new_balance": new_bal}
+    except Exception as e:
+        rollback(conn); return {"success": False, "error": str(e)}
+    finally:
+        close(conn)
+
+
+def submit_fraud_report(account_id, user_id, txn_id, reason, evidence=""):
+    conn = get_connection()
+    try:
+        txn = _pg_fetchone(conn, "SELECT * FROM transactions WHERE txn_id=? AND account_id=?", (txn_id, account_id))
+        if not txn: return {"success": False, "error": "Transaction not found."}
+        if txn["txn_type"] not in ("debit","blocked"): return {"success": False, "error": "Only payments can be reported."}
+        if txn["status"] == "reversed": return {"success": False, "error": "Already refunded."}
+
+        ex = _pg_fetchone(conn, "SELECT report_id, status FROM fraud_reports WHERE txn_id=? AND status IN ('pending','approved')", (txn_id,))
+        if ex:
+            if ex["status"] == "approved": return {"success": False, "error": "Already refunded."}
+            return {"success": False, "error": "Report already under review."}
+
+        rid = gen_id("RPT")
+        run(conn, "INSERT INTO fraud_reports (report_id,txn_id,account_id,user_id,reason,evidence,fraud_score) VALUES(?,?,?,?,?,?,?)",
+            (rid, txn_id, account_id, user_id, reason, evidence, txn["fraud_score"]))
+        commit(conn)
+        return {"success": True, "report_id": rid,
+                "message": "Fraud report submitted! Admin will review it shortly."}
+    except Exception as e:
+        rollback(conn); return {"success": False, "error": str(e)}
+    finally:
+        close(conn)
+
+
+def get_fraud_reports(account_id=None, status_filter=None):
+    conn    = get_connection()
+    try:
+        query   = """SELECT r.report_id, r.txn_id, r.account_id, r.user_id, r.reason,
+                            r.evidence, r.status, r.fraud_score, r.submitted_at,
+                            r.reviewed_at, r.reviewed_by, r.admin_notes, r.refund_txn_id,
+                            t.amount, t.merchant, t.timestamp as txn_date, t.location,
+                            u.full_name, u.email
+                     FROM fraud_reports r
+                     JOIN transactions t ON r.txn_id  = t.txn_id
+                     JOIN users        u ON r.user_id = u.user_id"""
+        params  = []
+        filters = []
+        if account_id:    filters.append("r.account_id=?"); params.append(account_id)
+        if status_filter: filters.append("r.status=?");     params.append(status_filter)
+        if filters: query += " WHERE " + " AND ".join(filters)
+        query += " ORDER BY r.submitted_at DESC"
+        return _pg_fetchall(conn, query, params)
+    finally:
+        close(conn)
+
+
+def admin_process_report(report_id, approve, admin_user_id, admin_notes=""):
+    conn = get_connection()
+    try:
+        rep = _pg_fetchone(conn, """
+            SELECT r.report_id, r.txn_id, r.account_id, r.status,
+                   t.amount
+            FROM fraud_reports r JOIN transactions t ON r.txn_id=t.txn_id
+            WHERE r.report_id=?""", (report_id,))
+        if not rep:                    return {"success": False, "error": "Report not found."}
+        if rep["status"] != "pending": return {"success": False, "error": f"Report already {rep['status']}."}
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if approve:
+            acc     = _pg_fetchone(conn, "SELECT balance FROM accounts WHERE account_id=?", (rep["account_id"],))
+            new_bal = acc["balance"] + rep["amount"]
+            run(conn, "UPDATE accounts SET balance=? WHERE account_id=?", (new_bal, rep["account_id"]))
+            ref_tid = gen_id("TXN")
+            run(conn, "INSERT INTO transactions (txn_id,account_id,txn_type,amount,balance_after,description,merchant,location,fraud_score,status) VALUES(?,?,'reversal',?,?,?,?,?,0,'success')",
+                (ref_tid, rep["account_id"], rep["amount"], new_bal,
+                 f"REFUND for {rep['txn_id']}", "SafeBank Fraud Team", "HQ"))
+            run(conn, "UPDATE transactions SET status='reversed' WHERE txn_id=?", (rep["txn_id"],))
+            run(conn, "UPDATE fraud_reports SET status='approved',reviewed_at=?,reviewed_by=?,admin_notes=?,refund_txn_id=? WHERE report_id=?",
+                (now, admin_user_id, admin_notes or "Verified fraud. Refund processed.", ref_tid, report_id))
+            commit(conn)
+            return {"success": True, "approved": True, "refund_amount": rep["amount"],
+                    "new_balance": new_bal, "refund_txn_id": ref_tid,
+                    "message": f"{fmt(rep['amount'])} refunded instantly."}
+        else:
+            run(conn, "UPDATE fraud_reports SET status='rejected',reviewed_at=?,reviewed_by=?,admin_notes=? WHERE report_id=?",
+                (now, admin_user_id, admin_notes or "Rejected after review.", report_id))
+            commit(conn)
+            return {"success": True, "approved": False, "message": "Report rejected."}
+    except Exception as e:
+        rollback(conn); return {"success": False, "error": str(e)}
+    finally:
+        close(conn)
+
+
+def get_all_users():
+    conn = get_connection()
+    try:
+        return _pg_fetchall(conn, """
+            SELECT u.user_id, u.full_name, u.email, u.phone, u.is_admin, u.created_at,
+                   a.account_id, a.balance, a.status as acc_status
+            FROM users u JOIN accounts a ON u.user_id = a.user_id
+            ORDER BY u.created_at DESC""", ())
+    finally:
+        close(conn)
